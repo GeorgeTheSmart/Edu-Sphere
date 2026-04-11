@@ -107,10 +107,11 @@ function extractCreatedCourseFromResponse(
       id: topCourseId,
       course: {
         id: topCourseId,
-        user_id: userId ?? '',
-        title: fallbackTopic.title,
-        description: fallbackTopic.description,
-        estimated_duration: 12,
+        user_id: coerceId(d.user_id ?? userId) ?? '',
+        title: typeof d.title === 'string' ? d.title : fallbackTopic.title,
+        description: typeof d.description === 'string' ? d.description : fallbackTopic.description,
+        estimated_duration: typeof d.total_hours === 'number' ? d.total_hours : 12,
+        modules: Array.isArray(d.modules) ? d.modules : undefined,
       },
     };
   }
@@ -236,6 +237,9 @@ export default function CoursesPage() {
       });
     };
 
+    // Load created courses first so we can filter topics against them
+    const enrolledTopicIds = new Set<string>();
+    const enrolledNameKeys = new Set<string>();
     try {
       const createdRaw = localStorage.getItem(CREATED_COURSES_STORAGE_KEY);
       if (createdRaw) {
@@ -244,6 +248,12 @@ export default function CoursesPage() {
           const cleaned = dedupeByName(createdParsed);
           localStorage.setItem(CREATED_COURSES_STORAGE_KEY, JSON.stringify(cleaned));
           setCreatedCourses(cleaned);
+          // Collect the IDs AND names of topics that have already been enrolled
+          cleaned.forEach((c) => {
+            enrolledTopicIds.add(String(c.id));
+            const nk = getCourseNameKey(c);
+            if (nk) enrolledNameKeys.add(nk);
+          });
         }
       }
     } catch {
@@ -255,9 +265,25 @@ export default function CoursesPage() {
       if (topicsRaw) {
         const topicsParsed = JSON.parse(topicsRaw) as Course[];
         if (Array.isArray(topicsParsed)) {
-          const cleaned = dedupeByName(topicsParsed);
+          // Remove topics the user has already enrolled in — match by ID or name
+          const withoutEnrolled = topicsParsed.filter(
+            (t) =>
+              !enrolledTopicIds.has(String(t.id)) &&
+              !enrolledNameKeys.has(getCourseNameKey(t) ?? '')
+          );
+          const cleaned = dedupeByName(withoutEnrolled);
           localStorage.setItem(topicsCacheKey, JSON.stringify(cleaned));
-          setDynamicCourses((prev) => (prev.length > 0 ? dedupeByName(prev) : cleaned));
+          setDynamicCourses((prev) =>
+            prev.length > 0
+              ? dedupeByName(
+                  prev.filter(
+                    (t) =>
+                      !enrolledTopicIds.has(String(t.id)) &&
+                      !enrolledNameKeys.has(getCourseNameKey(t) ?? '')
+                  )
+                )
+              : cleaned
+          );
         }
       }
     } catch {
@@ -392,19 +418,52 @@ export default function CoursesPage() {
   const handleUnenroll = (course: Course) => {
     const courseId = String(course.id);
     const courseNameKey = getCourseNameKey(course);
+    const userId = localStorage.getItem('userId') ?? 'anonymous';
+    const topicsCacheKey = `${TOPICS_CACHE_KEY_PREFIX}${TOPICS_CACHE_VERSION}_${userId}`;
 
+    // Clear all progress data for this course
     try {
       localStorage.removeItem(`learnsphere_course_${courseId}`);
       localStorage.removeItem(`learnsphere_progress_${courseId}`);
       localStorage.removeItem(`learnsphere_progress_pct_${courseId}`);
+      localStorage.removeItem(`learnsphere_project_uploads_${courseId}`);
+      localStorage.removeItem(`learnsphere_sections_${courseId}`);
     } catch {
       /* ignore storage issues */
     }
 
+    // Remove from enrolled/created courses list
     setCreatedCourses((prev) => {
       const next = prev.filter((c) => getCourseNameKey(c) !== courseNameKey && String(c.id) !== courseId);
       try {
         localStorage.setItem(CREATED_COURSES_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        /* ignore storage issues */
+      }
+      return next;
+    });
+
+    // Restore the course back into dynamicCourses so the user can re-enroll
+    const restoredTopic: Course = {
+      id: course.id,
+      title: course.title,
+      description: course.description,
+      progress: 0,
+      duration: course.duration,
+      difficulty: course.difficulty,
+      category: course.category ?? 'AI & Data Science',
+      enrolledStudents: course.enrolledStudents ?? 0,
+      instructor: course.instructor ?? 'LearnSphere AI',
+    };
+
+    setDynamicCourses((prev) => {
+      const alreadyPresent = prev.some(
+        (t) => getCourseNameKey(t) === courseNameKey || String(t.id) === courseId
+      );
+      if (alreadyPresent) return prev;
+      const next = [...prev, restoredTopic];
+      try {
+        localStorage.setItem(topicsCacheKey, JSON.stringify(next));
       } catch {
         /* ignore storage issues */
       }
@@ -645,10 +704,57 @@ export default function CoursesPage() {
             course={selectedCourseForCreation} 
             onClose={() => setSelectedCourseForCreation(null)} 
             onSuccess={(courseId, backendCourse) => {
+               // Capture the source topic ID before clearing the selection
+               const enrolledTopicId = String(selectedCourseForCreation!.id);
                setSelectedCourseForCreation(null);
+
+               // Remove the original topic card so it doesn't duplicate the created course
+               setDynamicCourses((prev) => {
+                 const next = prev.filter((c) => String(c.id) !== enrolledTopicId);
+                 try {
+                   const userId = localStorage.getItem('userId') ?? 'anonymous';
+                   const topicsCacheKey = `${TOPICS_CACHE_KEY_PREFIX}${TOPICS_CACHE_VERSION}_${userId}`;
+                   localStorage.setItem(topicsCacheKey, JSON.stringify(next));
+                 } catch {
+                   /* ignore */
+                 }
+                 return next;
+               });
+
                const card = mapBackendCourseToCard(backendCourse);
+               const cardNameKey = getCourseNameKey(card);
                setCreatedCourses((prev) => {
-                 const next = [card, ...prev.filter((c) => String(c.id) !== String(card.id))];
+                 // Remove old cards by ID *and* by name — old UUID cards with the same
+                 // title (e.g. offline fallback from a previous creation) must go so
+                 // the user always navigates to the fresh AI-generated course.
+                 const staleIds = prev
+                   .filter(
+                     (c) =>
+                       String(c.id) !== String(card.id) &&
+                       getCourseNameKey(c) === cardNameKey
+                   )
+                   .map((c) => String(c.id));
+
+                 // Clear the stale localStorage entries so old offline content
+                 // doesn't get served from cache on subsequent visits.
+                 staleIds.forEach((staleId) => {
+                   try {
+                     localStorage.removeItem(`learnsphere_course_${staleId}`);
+                     localStorage.removeItem(`learnsphere_progress_${staleId}`);
+                     localStorage.removeItem(`learnsphere_progress_pct_${staleId}`);
+                   } catch {
+                     /* ignore */
+                   }
+                 });
+
+                 const next = [
+                   card,
+                   ...prev.filter(
+                     (c) =>
+                       String(c.id) !== String(card.id) &&
+                       getCourseNameKey(c) !== cardNameKey
+                   ),
+                 ];
                  try {
                    localStorage.setItem(CREATED_COURSES_STORAGE_KEY, JSON.stringify(next));
                  } catch {

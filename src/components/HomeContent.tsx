@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import Navbar from "@/components/Navbar";
 import Testimonials from "@/components/Testimonials";
 import Footer from "@/components/Footer";
@@ -66,7 +67,16 @@ const ParallaxCursor = () => {
 };
 
 export default function HomeContent() {
+  const router = useRouter();
   const [isVisible, setIsVisible] = useState<{ [key: string]: boolean }>({});
+
+  const handleGetStarted = () => {
+    if (typeof window !== "undefined" && localStorage.getItem("learnsphere_user")) {
+      router.push("/dashboard");
+    } else {
+      window.dispatchEvent(new Event("openLoginModal"));
+    }
+  };
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -148,7 +158,7 @@ export default function HomeContent() {
             className={`mt-12 flex flex-col sm:flex-row justify-center gap-6 transition-all duration-1000 delay-300 ${isVisible['hero-buttons'] ? 'animate-in' : 'opacity-0'}`}
           >
             <button 
-              onClick={() => window.dispatchEvent(new Event("openLoginModal"))}
+              onClick={handleGetStarted}
               className="group relative bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-8 py-4 rounded-2xl font-semibold text-lg btn-glow overflow-hidden transition-all duration-300 hover:scale-105 hover:shadow-2xl shimmer-effect"
             >
               Get Started

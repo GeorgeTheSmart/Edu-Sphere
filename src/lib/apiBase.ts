@@ -2,7 +2,7 @@
  * Backend base URL. Override in `.env.local`:
  * `NEXT_PUBLIC_API_BASE_URL=https://your-host.example.com`
  */
-const DEFAULT_API_BASE = "https://d153-106-51-177-49.ngrok-free.app/";
+const DEFAULT_API_BASE = "http://localhost:8000";
 
 export function getApiBaseUrl(): string {
   const env = typeof process !== "undefined" ? process.env.NEXT_PUBLIC_API_BASE_URL?.trim() : "";

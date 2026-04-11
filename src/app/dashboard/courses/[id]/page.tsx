@@ -2,7 +2,7 @@
 
 import { useParams } from 'next/navigation';
 import { useState, useEffect, useRef, type MouseEvent as ReactMouseEvent, type WheelEvent as ReactWheelEvent } from 'react';
-import { BookOpen, Clock, Users, Star, Play, FileText, ExternalLink, Layers, ClipboardList, CheckCircle, ChevronRight, ChevronLeft, ChevronDown, Sparkles, HelpCircle, ListChecks, Network, Loader2 } from 'lucide-react';
+import { BookOpen, Clock, Users, Star, Play, FileText, ExternalLink, Layers, ClipboardList, CheckCircle, ChevronRight, ChevronLeft, ChevronDown, Sparkles, HelpCircle, ListChecks, Network, Loader2, Upload } from 'lucide-react';
 import { apiFetch } from '@/lib/apiBase';
 
 /** Nested course shape from POST /course/create or GET /course/:id/view */
@@ -97,13 +97,67 @@ interface ParsedContentSection {
   body: string;
 }
 
+function CodeSnippet({ code, lang }: { code: string; lang: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const highlight = (text: string) => {
+    const tokens = [];
+    const regex = /((?:#|\/\/).*?$)|(["'](?:(?=(\\?))\3.)*?\2)|(\b(?:def|class|if|else|elif|for|while|return|import|from|as|try|except|with|pass|break|continue|let|const|var|function|async|await|switch|case|true|false|None|null|undefined)\b)|(\b(?:print|console|log|len|range|map|filter|str|int|float)\b)|(\b\d+(?:\.\d+)?\b)/gm;
+    let lastIndex = 0;
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        tokens.push(<span key={`text-${lastIndex}`}>{text.substring(lastIndex, match.index)}</span>);
+      }
+      const [fullMatch, comment, str, keyword, builtin, number] = match;
+      if (comment) tokens.push(<span key={`tok-${match.index}`} className="text-[#6A9955] italic">{fullMatch}</span>);
+      else if (str) tokens.push(<span key={`tok-${match.index}`} className="text-[#CE9178]">{fullMatch}</span>);
+      else if (keyword) tokens.push(<span key={`tok-${match.index}`} className="text-[#C586C0] font-medium">{fullMatch}</span>);
+      else if (builtin) tokens.push(<span key={`tok-${match.index}`} className="text-[#DCDCAA]">{fullMatch}</span>);
+      else if (number) tokens.push(<span key={`tok-${match.index}`} className="text-[#B5CEA8]">{fullMatch}</span>);
+
+      lastIndex = regex.lastIndex;
+    }
+    if (lastIndex < text.length) {
+      tokens.push(<span key={`text-${lastIndex}`}>{text.substring(lastIndex)}</span>);
+    }
+    return tokens;
+  };
+
+  return (
+    <div className="my-4 rounded-lg overflow-hidden shadow-sm border border-slate-700 bg-[#1e1e1e]">
+      <div className="flex items-center justify-between bg-[#2d2d2d] text-slate-300 text-xs px-4 py-2 border-b border-slate-700 font-mono">
+        <span>{lang || 'code'}</span>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="flex items-center gap-1.5 hover:text-white transition-colors focus:outline-none"
+        >
+          {copied ? <CheckCircle className="w-3.5 h-3.5 text-emerald-400" /> : <ClipboardList className="w-3.5 h-3.5" />}
+          <span>{copied ? 'Copied!' : 'Copy'}</span>
+        </button>
+      </div>
+      <pre className="p-4 overflow-x-auto text-[#D4D4D4] font-mono text-sm leading-relaxed whitespace-pre" tabIndex={0}>
+        <code>{highlight(code)}</code>
+      </pre>
+    </div>
+  );
+}
+
 function isBackendCoursePayload(x: unknown): x is BackendCourse {
   return (
     typeof x === 'object' &&
     x !== null &&
     'modules' in x &&
     Array.isArray((x as BackendCourse).modules) &&
-    typeof (x as BackendCourse).title === 'string'
+    (typeof (x as BackendCourse).title === 'string' ||
+      typeof (x as Record<string,unknown>).id === 'string')
   );
 }
 
@@ -111,37 +165,73 @@ function normalizeApiCourse(raw: unknown): DisplayCourse | null {
   if (!raw || typeof raw !== 'object') return null;
 
   let payload = raw as Record<string, unknown>;
+
+  // Unwrap {success: true, course: {...}}
   if (payload.success === true && payload.course && typeof payload.course === 'object') {
     payload = payload.course as Record<string, unknown>;
   }
 
-  if (!isBackendCoursePayload(payload)) return null;
+  // Also handle root-level responses that have modules directly
+  if (!isBackendCoursePayload(payload)) {
+    // Try to get title from course_id responses
+    if (!Array.isArray((payload as any).modules) || (payload as any).modules.length === 0) {
+      return null;
+    }
+  }
 
-  const c = payload;
-  const flatLessonTitles = c.modules.flatMap((m) =>
+  // Ensure we have a title
+  const title = String(payload.title ?? payload.course_id ?? 'Untitled Course');
+  const id = String(payload.id ?? payload.course_id ?? '');
+  const description = String(payload.description ?? '');
+  const estimated_duration = Number(payload.estimated_duration ?? payload.total_hours ?? 0);
+  const rawModules = Array.isArray(payload.modules) ? payload.modules : [];
+
+  // Normalize modules to ensure they always have the expected shape
+  const modules: BackendModule[] = rawModules.map((m: any, mi: number) => ({
+    id: String(m.id ?? `module-${mi}`),
+    title: String(m.title ?? `Module ${mi + 1}`),
+    goal: String(m.goal ?? m.description ?? ''),
+    estimated_hours: Number(m.estimated_hours ?? 1),
+    lessons: Array.isArray(m.lessons)
+      ? m.lessons.map((l: any, li: number) => ({
+          id: String(l.id ?? `lesson-${mi}-${li}`),
+          title: String(l.title ?? `Lesson ${li + 1}`),
+          duration_minutes: Number(l.duration_minutes ?? 30),
+          content: String(l.content ?? ''),
+        }))
+      : [],
+    quizzes: Array.isArray(m.quizzes)
+      ? m.quizzes
+      : Array.isArray(m.puzzles)
+      ? m.puzzles
+      : [],
+    project: m.project ?? undefined,
+  }));
+
+  const flatLessonTitles = modules.flatMap((m) =>
     m.lessons.map((l) => `${m.title}: ${l.title}`)
   );
 
   const resourceRows: { name: string; link: string }[] = [];
-  c.modules.forEach((m, mi) => {
-    m.project?.requirements?.forEach((req, ri) => {
+  modules.forEach((m, mi) => {
+    m.project?.requirements?.forEach((req) => {
       resourceRows.push({ name: `Module ${mi + 1} — ${req}`, link: '#' });
     });
   });
 
   return {
-    id: c.id,
-    title: c.title,
-    description: c.description,
-    overview: c.description,
+    id,
+    title,
+    description,
+    overview: description,
     rating: 4.9,
     students: 1,
-    duration: `${c.estimated_duration} hours`,
+    duration: `${estimated_duration} hours`,
     level: 'Structured path',
     category: 'AI & Data Science',
     instructor: 'LearnSphere AI',
-    lessons: flatLessonTitles.length ? flatLessonTitles : [c.description.slice(0, 120) + '…'],
-    modules: c.modules,
+    lessons: flatLessonTitles.length ? flatLessonTitles : [description.slice(0, 120) + '…'],
+    modules,
     resources: resourceRows.length
       ? resourceRows
       : [{ name: 'Course materials', link: '#' }],
@@ -358,6 +448,8 @@ export default function CourseDetailPage() {
   const [isPanningMindmap, setIsPanningMindmap] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const mindmapViewportRef = useRef<HTMLDivElement | null>(null);
+  const [projectUploads, setProjectUploads] = useState<Record<string, { name: string; size: number }>>({}); // moduleId -> file info
+  const [completedSections, setCompletedSections] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     const sid = typeof id === 'string' ? id : Array.isArray(id) ? id[0] : '';
@@ -367,6 +459,14 @@ export default function CourseDetailPage() {
         if (stored) {
           setCompletedLessons(new Set(JSON.parse(stored)));
         }
+      } catch {}
+      try {
+        const storedUploads = localStorage.getItem(`learnsphere_project_uploads_${sid}`);
+        if (storedUploads) setProjectUploads(JSON.parse(storedUploads));
+      } catch {}
+      try {
+        const storedSections = localStorage.getItem(`learnsphere_sections_${sid}`);
+        if (storedSections) setCompletedSections(JSON.parse(storedSections));
       } catch {}
     }
   }, [id]);
@@ -378,6 +478,14 @@ export default function CourseDetailPage() {
       return;
     }
 
+    // --- Stale-while-revalidate ---
+    // 1. Show cached data immediately so there is no blank loading screen.
+    // 2. ALWAYS fetch from the API to get the authoritative AI-generated content.
+    // 3. Update the display (and cache) with whatever the API returns.
+    //    This ensures the offline-fallback course is replaced as soon as the
+    //    real content arrives from the backend.
+
+    let hasCached = false;
     try {
       const cached = localStorage.getItem(`learnsphere_course_${sid}`);
       if (cached) {
@@ -385,21 +493,22 @@ export default function CourseDetailPage() {
         const normalized = normalizeApiCourse(parsed);
         if (normalized) {
           setDisplayCourse(normalized);
-          setLoading(false);
-          return;
+          setLoading(false); // show cached UI instantly
+          hasCached = true;
         }
       }
     } catch {
       /* continue to fetch */
     }
 
+    // Always hit the API – this is the source of truth for module content
     apiFetch(`/course/${sid}/view`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data && !data.detail) {
           const normalized = normalizeApiCourse(data);
           if (normalized) {
-            setDisplayCourse(normalized);
+            setDisplayCourse(normalized); // replace cached/offline content
             try {
               const raw =
                 data && typeof data === 'object' && 'course' in data && (data as { course?: unknown }).course
@@ -409,13 +518,17 @@ export default function CourseDetailPage() {
             } catch {
               /* ignore */
             }
-          } else {
+          } else if (!hasCached) {
             setDisplayCourse(null);
           }
+        } else if (!hasCached) {
+          setDisplayCourse(null);
         }
         setLoading(false);
       })
       .catch(() => {
+        // API failed — keep showing the cached version if we have one
+        if (!hasCached) setDisplayCourse(null);
         setLoading(false);
       });
   }, [id]);
@@ -448,6 +561,97 @@ export default function CourseDetailPage() {
     );
   }
 
+  /** Recalculate overall progress from all completion criteria.
+   *  Weights:
+   *    Lessons (play buttons):      20%  — supplementary, NOT sufficient alone
+   *    Content viewed:              20%  — MANDATORY
+   *    Activities viewed:           20%  — MANDATORY
+   *    Project .zip uploaded:       20%  — MANDATORY
+   *    Flashcards viewed:            7%
+   *    Quiz viewed:                  7%
+   *    Mindmap viewed:               6%
+   */
+  const recalcProgress = (
+    lessonArr: string[],
+    sections: Record<string, boolean>,
+    uploads: Record<string, { name: string; size: number }>
+  ) => {
+    // 1. Lesson completion (20%)
+    let totalLessons = 0;
+    if (course?.modules?.length) {
+      totalLessons = course.modules.reduce((acc, m) => acc + m.lessons.length, 0);
+    } else if (course?.lessons) {
+      totalLessons = course.lessons.length;
+    }
+    const lessonPct = totalLessons > 0 ? (lessonArr.length / totalLessons) : 0;
+
+    // 2. Mandatory sections
+    const contentDone = sections['content'] ? 1 : 0;
+    const activitiesDone = sections['activities'] ? 1 : 0;
+
+    // 3. Bonus sections
+    const flashcardsDone = sections['flashcards'] ? 1 : 0;
+    const quizDone = sections['quiz'] ? 1 : 0;
+    const mindmapDone = sections['mindmap'] ? 1 : 0;
+
+    // 4. Project uploads (20%) — MANDATORY
+    let projectTotal = 0;
+    let projectDone = 0;
+    if (course?.modules?.length) {
+      course.modules.forEach((m) => {
+        if (m.project) {
+          projectTotal++;
+          if (uploads[m.id]) projectDone++;
+        }
+      });
+    }
+    const projectPct = projectTotal > 0 ? (projectDone / projectTotal) : 1;
+
+    const overallPct = Math.round(
+      lessonPct * 20 +
+      contentDone * 20 +
+      activitiesDone * 20 +
+      projectPct * 20 +
+      flashcardsDone * 7 +
+      quizDone * 7 +
+      mindmapDone * 6
+    );
+    localStorage.setItem(`learnsphere_progress_pct_${idStr}`, String(overallPct));
+    return overallPct;
+  };
+
+  const markSectionComplete = (section: string) => {
+    setCompletedSections((prev) => {
+      const next = { ...prev, [section]: true };
+      localStorage.setItem(`learnsphere_sections_${idStr}`, JSON.stringify(next));
+      recalcProgress(Array.from(completedLessons), next, projectUploads);
+      return next;
+    });
+  };
+
+  const handleProjectUpload = (moduleId: string, file: File) => {
+    if (!file.name.endsWith('.zip')) {
+      alert('Please upload a .zip file only.');
+      return;
+    }
+    setProjectUploads((prev) => {
+      const next = { ...prev, [moduleId]: { name: file.name, size: file.size } };
+      localStorage.setItem(`learnsphere_project_uploads_${idStr}`, JSON.stringify(next));
+      recalcProgress(Array.from(completedLessons), completedSections, next);
+      return next;
+    });
+  };
+
+  const removeProjectUpload = (moduleId: string) => {
+    setProjectUploads((prev) => {
+      const next = { ...prev };
+      delete next[moduleId];
+      localStorage.setItem(`learnsphere_project_uploads_${idStr}`, JSON.stringify(next));
+      recalcProgress(Array.from(completedLessons), completedSections, next);
+      return next;
+    });
+  };
+
   const toggleLesson = (lessonId: string) => {
     setCompletedLessons(prev => {
       const next = new Set(prev);
@@ -460,19 +664,7 @@ export default function CourseDetailPage() {
       
       const arr = Array.from(next);
       localStorage.setItem(`learnsphere_progress_${idStr}`, JSON.stringify(arr));
-
-      let total = 0;
-      if (course?.modules?.length) {
-        total = course.modules.reduce((acc, m) => acc + m.lessons.length, 0);
-      } else if (course?.lessons) {
-        total = course.lessons.length;
-      }
-      
-      let pct = 0;
-      if (total > 0) {
-        pct = Math.round((arr.length / total) * 100);
-        localStorage.setItem(`learnsphere_progress_pct_${idStr}`, String(pct));
-      }
+      recalcProgress(arr, completedSections, projectUploads);
 
       const userId = localStorage.getItem("userId");
       if (userId && isCompleted) {
@@ -573,6 +765,10 @@ export default function CourseDetailPage() {
     setActiveLearningTab(tab);
     if (tab !== 'content') {
       void ensureSectionData(tab);
+    }
+    // Mark this section as visited/completed for progress tracking
+    if (!completedSections[tab]) {
+      markSectionComplete(tab);
     }
   };
 
@@ -707,29 +903,26 @@ export default function CourseDetailPage() {
 
   const parseLessonContent = (content: string): ParsedContentSection[] => {
     if (!content?.trim()) return [];
-    const lines = content.split('\n').map((line) => line.trim());
+    const lines = content.split('\n');
     const sections: ParsedContentSection[] = [];
     let currentTitle = 'Overview';
     let currentBody: string[] = [];
 
     lines.forEach((line) => {
-      if (!line) {
-        if (currentBody.length > 0) currentBody.push('');
-        return;
-      }
-      if (line.startsWith('###')) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('###')) {
         if (currentBody.length > 0) {
-          sections.push({ title: currentTitle, body: currentBody.join(' ').trim() });
+          sections.push({ title: currentTitle, body: currentBody.join('\n').trim() });
           currentBody = [];
         }
-        currentTitle = line.replace(/^#{1,6}\s*/, '').trim() || 'Section';
+        currentTitle = trimmed.replace(/^#{1,6}\s*/, '') || 'Section';
       } else {
         currentBody.push(line);
       }
     });
 
     if (currentBody.length > 0) {
-      sections.push({ title: currentTitle, body: currentBody.join(' ').trim() });
+      sections.push({ title: currentTitle, body: currentBody.join('\n').trim() });
     }
 
     return sections.filter((s) => s.body.length > 0);
@@ -837,12 +1030,13 @@ export default function CourseDetailPage() {
               {learningTabs.map((tab) => {
                 const Icon = tab.icon;
                 const active = activeLearningTab === tab.id;
+                const done = !!completedSections[tab.id];
                 return (
                   <button
                     key={tab.id}
                     type="button"
                     onClick={() => handleLearningTabClick(tab.id)}
-                    className={`rounded-xl border px-3 py-3 text-sm font-medium flex items-center justify-center gap-2 transition ${
+                    className={`relative rounded-xl border px-3 py-3 text-sm font-medium flex items-center justify-center gap-2 transition ${
                       active
                         ? 'bg-indigo-600 text-white border-indigo-600 shadow'
                         : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'
@@ -850,6 +1044,9 @@ export default function CourseDetailPage() {
                   >
                     <Icon className="w-4 h-4" />
                     <span>{tab.label}</span>
+                    {done && (
+                      <CheckCircle className={`w-3.5 h-3.5 ${active ? 'text-emerald-300' : 'text-emerald-500'}`} />
+                    )}
                   </button>
                 );
               })}
@@ -889,7 +1086,21 @@ export default function CourseDetailPage() {
                                           <span className="inline-block w-2 h-2 rounded-full bg-indigo-500" />
                                           <h5 className="text-sm font-semibold text-indigo-900">{section.title}</h5>
                                         </div>
-                                        <p className="text-sm leading-7 text-gray-700">{section.body}</p>
+                                        <div className="text-sm leading-7 text-gray-700">
+                                          {!section.body.includes('```') ? (
+                                            <span className="whitespace-pre-wrap">{section.body}</span>
+                                          ) : (
+                                            section.body.split('```').map((part, pIdx) => {
+                                              if (pIdx % 2 !== 0) {
+                                                const firstNewline = part.indexOf('\n');
+                                                const lang = firstNewline !== -1 ? part.substring(0, firstNewline).trim() : '';
+                                                const code = firstNewline !== -1 ? part.substring(firstNewline + 1) : part;
+                                                return <CodeSnippet key={pIdx} lang={lang} code={code} />;
+                                              }
+                                              return <span key={pIdx} className="whitespace-pre-wrap">{part}</span>;
+                                            })
+                                          )}
+                                        </div>
                                       </div>
                                     ))}
                                   </div>
@@ -1316,10 +1527,18 @@ export default function CourseDetailPage() {
                             ))}
                           </div>
                           {mod.project && (
-                            <div className="p-4 bg-gray-50 border-t border-gray-200">
-                              <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
-                                <ClipboardList className="w-4 h-4" />
-                                Project
+                            <div className="p-4 bg-gradient-to-r from-gray-50 to-amber-50 border-t border-gray-200">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                                  <ClipboardList className="w-4 h-4" />
+                                  Project
+                                </div>
+                                {projectUploads[mod.id] && (
+                                  <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 px-2 py-1 rounded-full border border-emerald-200">
+                                    <CheckCircle className="w-3.5 h-3.5" />
+                                    Submitted
+                                  </span>
+                                )}
                               </div>
                               <p className="text-sm text-gray-700 mt-2">{mod.project.description}</p>
                               <div className="mt-3 flex flex-wrap gap-2 text-xs">
@@ -1332,6 +1551,56 @@ export default function CourseDetailPage() {
                                     {req}
                                   </span>
                                 ))}
+                              </div>
+                              {(mod.project.deliverables ?? []).length > 0 && (
+                                <div className="mt-3">
+                                  <p className="text-xs font-medium text-gray-600 mb-1">Deliverables:</p>
+                                  <ul className="list-disc list-inside text-xs text-gray-600 space-y-0.5">
+                                    {mod.project.deliverables.map((d, di) => (
+                                      <li key={`${mod.id}-del-${di}`}>{d}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+
+                              {/* Upload Section */}
+                              <div className="mt-4 p-3 rounded-lg border-2 border-dashed border-gray-300 bg-white">
+                                {!projectUploads[mod.id] ? (
+                                  <label className="flex flex-col items-center gap-2 cursor-pointer hover:bg-gray-50 transition-colors rounded-lg py-3">
+                                    <Upload className="w-8 h-8 text-gray-400" />
+                                    <span className="text-sm font-medium text-gray-700">Upload your project (.zip)</span>
+                                    <span className="text-xs text-gray-500">Click to browse or drag & drop</span>
+                                    <input
+                                      type="file"
+                                      accept=".zip,application/zip,application/x-zip-compressed"
+                                      className="hidden"
+                                      onChange={(e) => {
+                                        const file = e.target.files?.[0];
+                                        if (file) handleProjectUpload(mod.id, file);
+                                        e.target.value = '';
+                                      }}
+                                    />
+                                  </label>
+                                ) : (
+                                  <div className="flex items-center justify-between py-1">
+                                    <div className="flex items-center gap-3">
+                                      <div className="w-10 h-10 rounded-lg bg-emerald-100 flex items-center justify-center">
+                                        <FileText className="w-5 h-5 text-emerald-600" />
+                                      </div>
+                                      <div>
+                                        <p className="text-sm font-medium text-gray-900">{projectUploads[mod.id].name}</p>
+                                        <p className="text-xs text-gray-500">{(projectUploads[mod.id].size / 1024).toFixed(1)} KB</p>
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => removeProjectUpload(mod.id)}
+                                      className="text-xs text-red-500 hover:text-red-700 font-medium px-2 py-1 rounded hover:bg-red-50 transition-colors"
+                                    >
+                                      Remove
+                                    </button>
+                                  </div>
+                                )}
                               </div>
                             </div>
                           )}
